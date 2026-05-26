@@ -6,6 +6,14 @@ from src.agents import UserProfile, build_agents, PlannerAgent, generic_llm_no_r
 from src.rag_store import RAGStore
 
 
+AGENT_DISPLAY_NAMES = {
+    "energy": "Energy Efficiency Agent",
+    "breeam": "Building Research Establishment Environmental Assessment Method (BREEAM) Agent",
+    "wlca": "Whole Life Carbon Assessment (WLCA) Agent",
+    "cost": "Cost and Feasibility Agent",
+}
+
+
 @st.cache_resource
 def get_runtime():
     store = RAGStore()
@@ -17,7 +25,12 @@ def get_runtime():
 def main() -> None:
     st.set_page_config(page_title="GREAT", layout="wide")
     st.title("GREAT: Green Retrofit Evidence-grounded Agent Team")
-    st.caption("Benchmarking Multi-agent RAG System for Green Retrofit Planning in 3 LLM-based systems: (1) generic LLM without RAG, (2) single-agent with RAG, and (3) multi-agent with RAG.")
+    st.caption(
+        "Benchmarking Multi-agent Retrieval-Augmented Generation (RAG) for green retrofit planning: "
+        "(1) generic Large Language Model (LLM) without RAG, "
+        "(2) single-agent with RAG, and "
+        "(3) multi-agent with RAG."
+    )
 
     with st.sidebar:
         st.header("User/context profile")
@@ -27,12 +40,20 @@ def main() -> None:
         scope = st.text_input("Scope", "Single office building")
         timeframe = st.text_input("Timeframe", "net-zero by 2050")
         time_horizon_years = st.number_input("Planning horizon (years)", min_value=1, max_value=80, value=20)
+
         breeam_rating = st.selectbox(
-            "BREEAM rating appetite",
+            "Building Research Establishment Environmental Assessment Method (BREEAM) rating appetite",
             ["Outstanding", "Excellent", "Very Good", "Good", "Pass", "Unclassified", "No specific rating"],
             index=1,
         )
-        standards_target = "No specific BREEAM rating target" if breeam_rating == "No specific rating" else f"BREEAM {breeam_rating}, WLCA-aligned"
+
+        standards_target = (
+            "No specific Building Research Establishment Environmental Assessment Method (BREEAM) rating target"
+            if breeam_rating == "No specific rating"
+            else f"Building Research Establishment Environmental Assessment Method (BREEAM) {breeam_rating}, "
+                 f"Whole Life Carbon Assessment (WLCA)-aligned"
+        )
+
         budget = st.selectbox("Budget", ["low", "medium", "high"], index=1)
         risk_appetite = st.selectbox("Risk appetite", ["low", "moderate", "high"], index=1)
         extra_constraints = st.text_area("Extra constraints", "1960s concrete office, occupied during works")
@@ -54,7 +75,13 @@ def main() -> None:
     st.subheader("Question")
     question = st.text_area(
         "Ask GREAT",
-        value="Propose a strategic green retrofit plan for this building. Include key retrofit measures and project phasing timeline. Give justifications on the proposed measure relate to sustainable building certification principles outlined in BREEAM and the whole life carbon assessment (WLCA) framework.",
+        value=(
+            "Propose a strategic green retrofit plan for this building. "
+            "Include key retrofit measures and a project phasing timeline. "
+            "Give justifications on how the proposed measures are related to sustainable building certification "
+            "principles outlined in the Building Research Establishment Environmental Assessment Method (BREEAM) "
+            "and the Whole Life Carbon Assessment (WLCA) framework."
+        ),
         height=130,
     )
 
@@ -78,26 +105,29 @@ def main() -> None:
         show_multi = mode in {"All three", "Multi-agent with RAG"}
 
         if show_generic:
-            with st.spinner("Running generic LLM..."):
+            with st.spinner("Running generic Large Language Model (LLM)..."):
                 ans = generic_llm_no_rag(question, profile)
-            st.markdown("## Baseline 1: Generic LLM (no RAG)")
+            st.markdown("## Baseline 1: Generic Large Language Model (LLM), no Retrieval-Augmented Generation (RAG)")
             st.write(ans)
 
         if show_single:
-            with st.spinner("Running single-agent RAG..."):
+            with st.spinner("Running single-agent Retrieval-Augmented Generation (RAG)..."):
                 ans = single_agent_rag(question, profile, store)
-            st.markdown("## Baseline 2: Single-agent with RAG")
+            st.markdown("## Baseline 2: Single-agent with Retrieval-Augmented Generation (RAG)")
             st.write(ans)
 
         if show_multi:
-            with st.spinner("Running multi-agent with RAG..."):
+            with st.spinner("Running multi-agent Retrieval-Augmented Generation (RAG)..."):
                 per_agent = {name: agent.answer(question, profile) for name, agent in agents.items()}
                 final = planner.consolidate(question, profile, per_agent)
-            st.markdown("## Multi-agent RAG: output")
+
+            st.markdown("## Multi-agent Retrieval-Augmented Generation (RAG): Planner output")
             st.write(final)
+
             with st.expander("Show specialised agent outputs"):
                 for name, text in per_agent.items():
-                    st.markdown(f"### {name.capitalize()} agent")
+                    display_name = AGENT_DISPLAY_NAMES.get(name, f"{name.capitalize()} Agent")
+                    st.markdown(f"### {display_name}")
                     st.write(text)
 
 
