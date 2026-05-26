@@ -14,12 +14,12 @@ client = OpenAI()
 @dataclass
 class UserProfile:
     """Privacy-safe user/context profile. We do not collect the user's name."""
-    profession: str = "Area Chief Engineer"
+    profession: str = "asset manager"
     organisation: str = ""
-    primary_concern: str = "energy and carbon savings"
+    primary_concern: str = "energy and carbon"
     scope: str = "single office building"
     location: str = "UK"
-    timeframe: str = "net-zero by 2050"
+    timeframe: str = "net-zero by 2040"
     time_horizon_years: int = 20
     standards_target: str = "BREEAM Excellent, WLCA-aligned"
     budget: str = "medium"      # low / medium / high
