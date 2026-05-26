@@ -16,8 +16,8 @@ def get_runtime():
 
 def main() -> None:
     st.set_page_config(page_title="GREAT", layout="wide")
-    st.title("GREAT: Multi-Agent RAG for Standards-Grounded Green Retrofit Planning")
-    st.caption("MVP research prototype: compare generic LLM, single-agent RAG, and multi-agent RAG.")
+    st.title("GREAT: Green Retrofit Evidence-grounded Agent Team")
+    st.caption("Benchmarking Multi-agent RAG System for Green Retrofit Planning in 3 LLM-based systems in green retrofit planning: (1) generic LLM without RAG, (2) single-agent with RAG, and (3) multi-agent with RAG.")
 
     with st.sidebar:
         st.header("User/context profile")
@@ -54,13 +54,13 @@ def main() -> None:
     st.subheader("Question")
     question = st.text_area(
         "Ask GREAT",
-        value="Propose a strategic green retrofit plan for this building. Include key measures, phasing, and how they relate to BREEAM and WLCA.",
+        value="Propose a strategic green retrofit plan for this building. Include key measures, phasing, and how they relate to sustainable building certification by BREEAM and whole life carbon assessment (WLCA).",
         height=130,
     )
 
     mode = st.radio(
         "System mode",
-        ["All three", "Generic LLM (no RAG)", "Single-agent RAG", "Multi-agent RAG (Planner)"],
+        ["All three", "Generic LLM (no RAG)", "Single-agent with RAG", "Multi-agent with RAG"],
         horizontal=True,
     )
 
@@ -74,8 +74,8 @@ def main() -> None:
 
         store, agents, planner = get_runtime()
         show_generic = mode in {"All three", "Generic LLM (no RAG)"}
-        show_single = mode in {"All three", "Single-agent RAG"}
-        show_multi = mode in {"All three", "Multi-agent RAG (Planner)"}
+        show_single = mode in {"All three", "Single-agent with RAG"}
+        show_multi = mode in {"All three", "Multi-agent with RAG"}
 
         if show_generic:
             with st.spinner("Running generic LLM..."):
@@ -86,14 +86,14 @@ def main() -> None:
         if show_single:
             with st.spinner("Running single-agent RAG..."):
                 ans = single_agent_rag(question, profile, store)
-            st.markdown("## Baseline 2: Single-agent RAG")
+            st.markdown("## Baseline 2: Single-agent with RAG")
             st.write(ans)
 
         if show_multi:
-            with st.spinner("Running multi-agent RAG..."):
+            with st.spinner("Running multi-agent with RAG..."):
                 per_agent = {name: agent.answer(question, profile) for name, agent in agents.items()}
                 final = planner.consolidate(question, profile, per_agent)
-            st.markdown("## Multi-agent RAG: Planner / Orchestrator output")
+            st.markdown("## Multi-agent RAG: output")
             st.write(final)
             with st.expander("Show specialised agent outputs"):
                 for name, text in per_agent.items():
