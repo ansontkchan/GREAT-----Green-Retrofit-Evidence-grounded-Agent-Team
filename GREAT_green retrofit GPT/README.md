@@ -1,6 +1,6 @@
-# GREAT: Benchmarking Multi-agent RAG System for Green Retrofit Planning
+# 🚀GREAT: Benchmarking Multi-agent RAG System for Green Retrofit Planning
 
-**GREAT** stands for **Green Retrofit Evidence-grounded Agent Team**.
+**🍀GREAT** stands for **Green Retrofit Evidence-grounded Agent Team**.
 
 This repository contains research project which compares three Large Language Model (LLM) systems for green retrofit planning in the UK:
 
