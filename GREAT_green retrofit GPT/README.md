@@ -8,9 +8,9 @@ This repository contains research project which compares three Large Language Mo
 2. **Single-agent RAG** over one combined evidence corpus
 3. **GREAT multi-agent RAG** with (1) Energy, (2) BREEAM (a UK-based certification for sustainable buildings), (3) WLCA (Whole Life Carbon Assessment), (4) Cost, and (5) Planner agents
 
-The current research prototype is positioned as a controlled and text-based multi-agent RAG benchmark. While developing a full enterprise agentic-RAG system with live tool routing, BIM/digital-twin integration, simulation APIs, or GIS/weather querying is **not** the scope of this research project, these functionalities are future extensions.
+💡The current research prototype is positioned as a controlled and text-based multi-agent RAG benchmark. While developing a full enterprise agentic-RAG system with live tool routing, BIM/digital-twin integration, simulation APIs, or GIS/weather querying is **NOT** the scope of this research project, these functionalities are future extensions.
 
-Most of the standards adopted in this repository are UK-based, for example BREEAM certification standard, whole life carbon assessment (WLCA) and cost analysis guidance note issued by the Royal Institutional of Chartered Surveyors (RICS). The evaluation corpus created in JSON format is also extracted from the UK Green Building Council green retrofit case database. We acknolwedge the limitations of this regional benchmarking and welcome future researchers and AI engineers to extend this GREAT repository to other jurisdictions.
+💡Most of the standards adopted in this repository are UK-based, for example the BREEAM sustainable building certification, whole life carbon assessment (WLCA) and cost analysis guidance note issued by the Royal Institutional of Chartered Surveyors (RICS). The evaluation corpus created in JSON format is also extracted from the UK Green Building Council (UKGBC) green retrofit case database. We acknolwedge the limitations of this regional benchmarking and welcome future researchers or AI engineers to extend GREAT to other jurisdictions.
 
 ---
 
