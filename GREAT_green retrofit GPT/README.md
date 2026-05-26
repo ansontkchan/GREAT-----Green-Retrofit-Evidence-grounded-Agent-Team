@@ -161,10 +161,12 @@ Example fields:
   "source_url": "https://ukgbc.org/resources/tempo/",
   "building_type": "office",
   "location": "London, UK",
+  "construction_year": "1997",
+  "floor_area_m2": "200,000 sq ft",
   "goals": ["BREEAM Excellent", "net-zero operational carbon"],
-  "constraints": ["occupied during works"],
+  "constraints": ["limited budget"]
   "measures": ["heat pump", "PV", "LED lighting", "BMS"],
-  "lessons": []
+  "lessons learnt": []
 }
 ```
 
