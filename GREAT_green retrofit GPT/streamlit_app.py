@@ -54,7 +54,7 @@ def main() -> None:
     st.subheader("Question")
     question = st.text_area(
         "Ask GREAT",
-        value="Propose a strategic green retrofit plan for this building. Include key retrofit measures, phasing. Give justifications on the proposed measure relate to sustainable building certification principles outlined in BREEAM and the whole life carbon assessment (WLCA) framework.",
+        value="Propose a strategic green retrofit plan for this building. Include key retrofit measures and project phasing timeline. Give justifications on the proposed measure relate to sustainable building certification principles outlined in BREEAM and the whole life carbon assessment (WLCA) framework.",
         height=130,
     )
 
