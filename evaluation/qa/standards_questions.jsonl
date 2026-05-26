@@ -1,0 +1,3 @@
+{"id":"breeam_001","domain":"breeam","question":"What are the BREEAM rating levels?","expected_facts":["Pass","Good","Very Good","Excellent","Outstanding"]}
+{"id":"wlca_001","domain":"wlca","question":"What is the purpose of Whole Life Carbon Assessment in building retrofit planning?","expected_facts":["embodied carbon","operational carbon","life cycle","carbon reduction"]}
+{"id":"energy_001","domain":"energy","question":"Why is a fabric-first approach commonly recommended in building retrofit?","expected_facts":["reduce heat loss","reduce energy demand","improve thermal performance"]}
