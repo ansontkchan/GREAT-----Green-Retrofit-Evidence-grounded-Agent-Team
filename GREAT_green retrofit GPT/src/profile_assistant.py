@@ -48,8 +48,8 @@ def collect_profile_cli() -> UserProfile:
     )
     standards_target = "No specific BREEAM rating target" if breeam_choice == "No specific rating" else f"BREEAM {breeam_choice}, WLCA-aligned"
 
-    budget_band = _choose(
-        "Budget band",
+    budget = _choose(
+        "Budget",
         [
             "low – essential / quick-payback only",
             "medium – balanced fabric + systems package",
@@ -75,7 +75,7 @@ def collect_profile_cli() -> UserProfile:
         timeframe=timeframe,
         time_horizon_years=time_horizon_years,
         standards_target=standards_target,
-        budget_band=budget_band,
+        budget=budget,
         risk_appetite=risk_appetite,
         extra_constraints=extra_constraints,
     )

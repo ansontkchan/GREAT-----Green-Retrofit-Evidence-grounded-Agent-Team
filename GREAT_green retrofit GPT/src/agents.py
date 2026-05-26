@@ -22,7 +22,7 @@ class UserProfile:
     timeframe: str = "net-zero by 2040"
     time_horizon_years: int = 20
     standards_target: str = "BREEAM Excellent, WLCA-aligned"
-    budget_band: str = "medium"      # low / medium / high
+    budget: str = "medium"      # low / medium / high
     risk_appetite: str = "moderate"  # low / moderate / high
     extra_constraints: str = ""
 
@@ -37,7 +37,7 @@ class UserProfile:
             f"- Timeframe: {self.timeframe}",
             f"- Time horizon years: {self.time_horizon_years}",
             f"- Standards target: {self.standards_target}",
-            f"- Budget band: {self.budget_band}",
+            f"- Budget: {self.budget}",
             f"- Risk appetite: {self.risk_appetite}",
             f"- Extra constraints: {self.extra_constraints or 'none'}",
         ]

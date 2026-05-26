@@ -28,7 +28,7 @@ def build_profile_from_case(case: UKGBCCase) -> UserProfile:
         timeframe="net-zero by 2040",
         time_horizon_years=20,
         standards_target=", ".join(case.goals) if case.goals else "BREEAM / WLCA aligned",
-        budget_band="medium",
+        budget="medium",
         risk_appetite="moderate",
         extra_constraints="; ".join(case.constraints) if case.constraints else "",
     )

@@ -17,15 +17,15 @@ def get_runtime():
 def main() -> None:
     st.set_page_config(page_title="GREAT", layout="wide")
     st.title("GREAT: Green Retrofit Evidence-grounded Agent Team")
-    st.caption("Benchmarking Multi-agent RAG System for Green Retrofit Planning in 3 LLM-based systems in green retrofit planning: (1) generic LLM without RAG, (2) single-agent with RAG, and (3) multi-agent with RAG.")
+    st.caption("Benchmarking Multi-agent RAG System for Green Retrofit Planning in 3 LLM-based systems: (1) generic LLM without RAG, (2) single-agent with RAG, and (3) multi-agent with RAG.")
 
     with st.sidebar:
         st.header("User/context profile")
-        profession = st.text_input("Profession / role", "asset manager")
+        profession = st.text_input("Profession / Role", "Area Chief Engineer")
         location = st.text_input("Location", "London, UK")
-        primary_concern = st.text_input("Primary concern", "energy and carbon")
-        scope = st.text_input("Scope", "single office building")
-        timeframe = st.text_input("Timeframe", "net-zero by 2040")
+        primary_concern = st.text_input("Primary concern", "energy and carbon savings")
+        scope = st.text_input("Scope", "Single office building")
+        timeframe = st.text_input("Timeframe", "net-zero by 2050")
         time_horizon_years = st.number_input("Planning horizon (years)", min_value=1, max_value=80, value=20)
         breeam_rating = st.selectbox(
             "BREEAM rating appetite",
@@ -33,7 +33,7 @@ def main() -> None:
             index=1,
         )
         standards_target = "No specific BREEAM rating target" if breeam_rating == "No specific rating" else f"BREEAM {breeam_rating}, WLCA-aligned"
-        budget_band = st.selectbox("Budget band", ["low", "medium", "high"], index=1)
+        budget = st.selectbox("Budget", ["low", "medium", "high"], index=1)
         risk_appetite = st.selectbox("Risk appetite", ["low", "moderate", "high"], index=1)
         extra_constraints = st.text_area("Extra constraints", "1960s concrete office, occupied during works")
 
@@ -46,7 +46,7 @@ def main() -> None:
         timeframe=timeframe,
         time_horizon_years=int(time_horizon_years),
         standards_target=standards_target,
-        budget_band=budget_band,
+        budget=budget,
         risk_appetite=risk_appetite,
         extra_constraints=extra_constraints,
     )
@@ -54,7 +54,7 @@ def main() -> None:
     st.subheader("Question")
     question = st.text_area(
         "Ask GREAT",
-        value="Propose a strategic green retrofit plan for this building. Include key measures, phasing, and how they relate to sustainable building certification by BREEAM and whole life carbon assessment (WLCA).",
+        value="Propose a strategic green retrofit plan for this building. Include key retrofit measures, phasing. Give justifications on the proposed measure relate to sustainable building certification principles outlined in BREEAM and the whole life carbon assessment (WLCA) framework.",
         height=130,
     )
 
