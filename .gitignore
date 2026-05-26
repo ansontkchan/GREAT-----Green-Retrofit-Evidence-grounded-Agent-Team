@@ -1,0 +1,21 @@
+# Python virtual environment
+.venv/
+
+# Environment variables / secrets
+.env
+
+# Chroma vector database
+.chroma_great/
+.chroma_greenretrofit/
+
+# Python cache
+__pycache__/
+*.pyc
+src/__pycache__/
+
+# Logs and generated outputs
+logs/
+chat_history/
+
+# Do not commit copyrighted/proprietary PDFs
+data/**/*.pdf

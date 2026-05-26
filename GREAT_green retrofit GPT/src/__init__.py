@@ -1,1 +1,0 @@
-# GREAT source package

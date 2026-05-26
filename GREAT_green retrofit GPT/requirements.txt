@@ -1,6 +1,0 @@
-openai>=2.0.0
-chromadb>=1.0.0
-pypdf>=6.0.0
-python-dotenv>=1.0.1
-streamlit>=1.39.0
-pandas>=2.2.0
