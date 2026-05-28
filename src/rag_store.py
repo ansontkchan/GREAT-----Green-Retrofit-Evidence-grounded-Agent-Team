@@ -16,7 +16,7 @@ class RAGStore:
 
     Collections:
       - breeam: BREEAM corpus
-      - wlca: RICS WLCA corpus
+      - wlca: Whole Life Carbon Assessment corpus
       - energy: energy/retrofit corpus
       - cost: cost/business-case corpus
       - ALL: all chunks for the single-agent RAG baseline
@@ -44,8 +44,10 @@ class RAGStore:
             self.client.delete_collection(name)
         except Exception:
             pass
+
         if name in self._collections:
             del self._collections[name]
+
         self._get_collection(name)
 
     @staticmethod
@@ -53,34 +55,96 @@ class RAGStore:
         """Return [(page_number, text), ...]. Page numbers are 1-indexed."""
         reader = PdfReader(str(path))
         pages: List[Tuple[int, str]] = []
+
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
+
             if text.strip():
                 pages.append((i + 1, text))
+
         return pages
 
     @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 250) -> List[str]:
-        """Simple character-based chunker for MVP."""
+    def chunk_text(
+        text: str,
+        chunk_size: int = 1200,
+        overlap: int = 200,
+    ) -> List[str]:
+        """
+        Split text into overlapping character chunks.
+
+        Rationale:
+        - PDFs are too long to retrieve or embed as one document.
+        - Chunking creates retrievable evidence units.
+        - Overlap helps preserve continuity across section boundaries.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive.")
+
+        if overlap < 0:
+            raise ValueError("overlap must be non-negative.")
+
+        if overlap >= chunk_size:
+            raise ValueError("overlap must be smaller than chunk_size.")
+
         chunks: List[str] = []
         start = 0
         n = len(text)
+
         while start < n:
             end = min(start + chunk_size, n)
             chunk = text[start:end].strip()
+
             if chunk:
                 chunks.append(chunk)
+
             if end == n:
                 break
-            start = max(0, end - overlap)
+
+            start = end - overlap
+
         return chunks
 
-    def ingest_pdfs(self, agent_name: str, pdf_paths: List[Path], reset_agent_collection: bool = False) -> None:
+    @staticmethod
+    def _batched_upsert(
+        collection,
+        documents: List[str],
+        metadatas: List[dict],
+        ids: List[str],
+        batch_size: int = 100,
+    ) -> None:
+        """
+        Upsert documents into Chroma in smaller batches.
+
+        This avoids OpenAI embedding API token-per-request limits.
+        """
+        total = len(documents)
+
+        if total == 0:
+            return
+
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+
+            collection.upsert(
+                documents=documents[start:end],
+                metadatas=metadatas[start:end],
+                ids=ids[start:end],
+            )
+
+            print(f"  Upserted batch {start}-{end} of {total}")
+
+    def ingest_pdfs(
+        self,
+        agent_name: str,
+        pdf_paths: List[Path],
+        reset_agent_collection: bool = False,
+    ) -> None:
         """
         Ingest PDFs into an agent-specific collection and the global ALL collection.
 
-        Uses upsert instead of add, so re-running ingestion will update existing IDs
-        rather than crash on duplicates.
+        Uses upsert instead of add, so re-running ingestion updates existing IDs
+        rather than crashing on duplicates.
         """
         if reset_agent_collection:
             print(f"[{agent_name}] Resetting collection '{agent_name}' ...")
@@ -101,17 +165,21 @@ class RAGStore:
         for pdf_path in pdf_paths:
             print(f"[{agent_name}] Ingesting {pdf_path} ...")
             pages = self.extract_pages_from_pdf(pdf_path)
+
             for page_number, page_text in pages:
                 chunks = self.chunk_text(page_text)
+
                 for chunk_index, chunk in enumerate(chunks):
                     safe_stem = pdf_path.stem.replace(" ", "_")
                     uid = f"{agent_name}-{safe_stem}-p{page_number}-c{chunk_index}"
+
                     meta = {
                         "source": pdf_path.name,
                         "page": page_number,
                         "chunk_index": chunk_index,
                         "agent": agent_name,
                     }
+
                     docs_agent.append(chunk)
                     metas_agent.append(meta)
                     ids_agent.append(uid)
@@ -121,15 +189,42 @@ class RAGStore:
                     ids_all.append(uid)
 
         if docs_agent:
-            col_agent.upsert(documents=docs_agent, metadatas=metas_agent, ids=ids_agent)
-            col_all.upsert(documents=docs_all, metadatas=metas_all, ids=ids_all)
-            print(f"[{agent_name}] Upserted {len(docs_agent)} chunks into '{agent_name}' and 'ALL'.")
+            self._batched_upsert(
+                col_agent,
+                docs_agent,
+                metas_agent,
+                ids_agent,
+                batch_size=100,
+            )
+
+            self._batched_upsert(
+                col_all,
+                docs_all,
+                metas_all,
+                ids_all,
+                batch_size=100,
+            )
+
+            print(
+                f"[{agent_name}] Upserted {len(docs_agent)} chunks "
+                f"into '{agent_name}' and 'ALL'."
+            )
         else:
             print(f"[{agent_name}] No text chunks found.")
 
-    def query(self, collection_name: str, query_text: str, n_results: int = 6) -> str:
+    def query(
+        self,
+        collection_name: str,
+        query_text: str,
+        n_results: int = 6,
+    ) -> str:
         col = self._get_collection(collection_name)
-        result = col.query(query_texts=[query_text], n_results=n_results)
+
+        result = col.query(
+            query_texts=[query_text],
+            n_results=n_results,
+        )
+
         docs = result.get("documents", [[]])[0]
         metas = result.get("metadatas", [[]])[0]
 
@@ -137,9 +232,14 @@ class RAGStore:
             return "No retrieved context found."
 
         lines: List[str] = []
+
         for i, (doc, meta) in enumerate(zip(docs, metas), start=1):
             src = meta.get("source", "unknown")
             page = meta.get("page", "?")
             agent = meta.get("agent", collection_name)
-            lines.append(f"[{i}] source={src}, page={page}, corpus={agent}\n{doc}")
+
+            lines.append(
+                f"[{i}] source={src}, page={page}, corpus={agent}\n{doc}"
+            )
+
         return "\n\n".join(lines)
