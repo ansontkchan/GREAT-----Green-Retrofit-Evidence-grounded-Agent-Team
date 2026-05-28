@@ -39,7 +39,7 @@ def load_questions(path: Path = QA_PATH) -> List[Dict[str, Any]]:
 
 def make_default_profile() -> UserProfile:
     return UserProfile(
-        profession="asset manager",
+        profession="Area Chief Engineer",
         organisation="",
         primary_concern="energy and carbon savings",
         scope="single office building",
