@@ -18,4 +18,5 @@ logs/
 chat_history/
 
 # Do not commit copyrighted/proprietary PDFs
+data/**/*.PDF
 data/**/*.pdf
