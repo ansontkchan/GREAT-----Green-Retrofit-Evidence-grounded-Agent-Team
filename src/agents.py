@@ -119,6 +119,20 @@ class RAGAgent:
     # RETRIEVAL
     # ========================================================
 
+    def retrieve_trace(
+        self,
+        query: str,
+        k: int = SPECIALIST_TOP_K,
+    ):
+        """
+        Return structured retrieval metadata for evaluation.
+        """
+        return self.store.query_with_metadata(
+            self.collection_name,
+            query,
+            n_results=k,
+        )
+
     def retrieve_context(
         self,
         query: str,

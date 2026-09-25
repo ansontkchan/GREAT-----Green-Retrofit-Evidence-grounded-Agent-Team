@@ -2,556 +2,767 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
-from openai import OpenAI
-
-from .config import OPENAI_MODEL
+from .agents import (
+    UserProfile,
+    build_agents,
+    PlannerAgent,
+    generic_llm_no_rag,
+    single_agent_rag,
+)
+from .rag_store import RAGStore
 
 
 # ============================================================
-# CONFIGURATION
+# FINAL EXPERIMENT CONFIGURATION
 # ============================================================
 
-INPUT_PATH = Path("logs/qa_full_outputs_run_01.jsonl")
+QA_PATH = Path("evaluation/qa/standards_questions_48.jsonl")
 OUT_DIR = Path("logs")
 
-# Set JUDGE_MODEL in .env or the shell if you want a separate
-# evaluation model. Otherwise it uses the configured model.
-JUDGE_MODEL = os.getenv("JUDGE_MODEL", OPENAI_MODEL)
+# One execution = one experimental run.
+# Use run_01 ... run_05 for the five repeated runs.
+RUN_ID = "run_01"
 
-# Deterministic judge setting.
-JUDGE_TEMPERATURE = 0.0
+# Smoke test first. Set to False only after the 9-response test passes.
+PILOT_MODE = False
+PILOT_IDS = [
+    "breeam_001",
+    "wlca_008",
+    "energy_010",
+]
+
+SYSTEMS = [
+    "generic_llm_no_rag",
+    "single_agent_rag",
+    "great_multi_agent_rag",
+]
 
 
 # ============================================================
-# OPENAI CLIENT
+# BENCHMARK LOADING AND VALIDATION
 # ============================================================
 
-client = OpenAI()
+def load_questions(path: Path = QA_PATH) -> List[Dict[str, Any]]:
+    questions: List[Dict[str, Any]] = []
 
-
-# ============================================================
-# JSON / TEXT HELPERS
-# ============================================================
-
-def extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from a model response."""
-    text = text.strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-
-    if not match:
-        raise ValueError(
-            "Judge response did not contain a valid JSON object."
-        )
-
-    return json.loads(match.group(0))
-
-
-def load_records(path: Path) -> List[Dict[str, Any]]:
-    """Load generated benchmark outputs."""
     if not path.exists():
-        raise FileNotFoundError(
-            f"Input JSONL not found: {path}"
-        )
-
-    records: List[Dict[str, Any]] = []
+        raise FileNotFoundError(f"QA benchmark not found: {path}")
 
     with path.open("r", encoding="utf-8") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
-
             if not line:
                 continue
-
             try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as e:
+                questions.append(json.loads(line))
+            except json.JSONDecodeError as exc:
                 raise ValueError(
-                    f"Invalid JSON on line {line_number}: {e}"
-                ) from e
+                    f"Invalid JSON on line {line_number}: {exc}"
+                ) from exc
 
-    return records
+    return questions
 
 
-def validate_records(
-    records: List[Dict[str, Any]],
-) -> None:
-    """Validate the expected 48-question × 3-system structure."""
-    if not records:
-        raise ValueError("No evaluation records found.")
-
-    if len(records) != 48:
+def validate_benchmark(questions: List[Dict[str, Any]]) -> None:
+    if len(questions) != 48:
         raise ValueError(
-            f"Expected 48 question records, found {len(records)}."
+            f"Expected exactly 48 benchmark questions; found {len(questions)}."
         )
 
-    ids = [r.get("id") for r in records]
+    required = [
+        "id",
+        "domain",
+        "question_type",
+        "difficulty",
+        "question",
+        "expected_facts",
+        "forbidden_facts",
+        "source_doc_id",
+        "source_pages",
+        "scoring_note",
+    ]
 
-    if len(set(ids)) != len(ids):
-        raise ValueError("Duplicate question IDs found.")
+    ids = set()
+    for index, question in enumerate(questions, start=1):
+        for field in required:
+            if field not in question:
+                raise ValueError(
+                    f"Question {index} ({question.get('id', '?')}) "
+                    f"is missing required field: {field}"
+                )
 
-    expected_systems = {
-        "generic_llm_no_rag",
-        "single_agent_rag",
-        "great_multi_agent_rag",
-    }
+        qid = question["id"]
+        if qid in ids:
+            raise ValueError(f"Duplicate question ID: {qid}")
+        ids.add(qid)
 
-    for record in records:
-        systems = set(record.get("systems", {}).keys())
+        if not isinstance(question["expected_facts"], list):
+            raise ValueError(f"expected_facts must be a list: {qid}")
+        if not isinstance(question["forbidden_facts"], list):
+            raise ValueError(f"forbidden_facts must be a list: {qid}")
 
-        if systems != expected_systems:
-            raise ValueError(
-                f"Unexpected systems for {record.get('id')}: "
-                f"{sorted(systems)}"
-            )
+
+def select_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not PILOT_MODE:
+        return questions
+
+    lookup = {q["id"]: q for q in questions}
+    missing = [qid for qid in PILOT_IDS if qid not in lookup]
+    if missing:
+        raise ValueError(f"Pilot question IDs not found: {missing}")
+
+    return [lookup[qid] for qid in PILOT_IDS]
 
 
 # ============================================================
-# SEMANTIC FACT JUDGE
+# FIXED USER CONTEXT
 # ============================================================
 
-JUDGE_SYSTEM_PROMPT = """
-You are an independent evaluator of answers to a technical
-green-retrofit knowledge benchmark.
-
-Score each expected fact against the candidate answer.
-
-Use this strict scale for EACH expected fact:
-
-0 = absent, contradicted, or materially incorrect.
-1 = partially expressed, incomplete, or only weakly supported.
-2 = clearly and correctly expressed, including valid semantic
-    paraphrases. Do not require exact wording.
-
-Important rules:
-- Judge meaning, not keyword overlap.
-- Do not penalise valid paraphrases.
-- Do not give credit merely because a related topic is mentioned.
-- Do not infer a fact that the answer does not actually communicate.
-- If the answer contradicts an expected fact, score 0.
-- Do not require extra details beyond the expected fact itself.
-- Do not invent additional required facts.
-- The benchmark expected_facts are the scoring criteria.
-- Return ONLY valid JSON.
-"""
+def make_default_profile() -> UserProfile:
+    return UserProfile(
+        profession="Area Chief Engineer",
+        organisation="",
+        primary_concern="energy and carbon savings",
+        scope="single office building",
+        location="London, UK",
+        timeframe="net-zero by 2050",
+        time_horizon_years=20,
+        standards_target=(
+            "Building Research Establishment Environmental Assessment "
+            "Method (BREEAM) Excellent, Whole Life Carbon Assessment "
+            "(WLCA)-aligned"
+        ),
+        budget="medium",
+        risk_appetite="moderate",
+        extra_constraints="1960s concrete office, occupied during works",
+    )
 
 
-def judge_facts(
-    question: str,
-    expected_facts: List[str],
-    forbidden_facts: List[str],
+# ============================================================
+# DETERMINISTIC SEMANTIC-LITE FACT SCORING
+# ============================================================
+#
+# The benchmark's expected_facts are the scoring units. We do not
+# use an additional LLM judge in the 720-response experiment.
+# Instead, this scorer normalises terminology and checks whether
+# the answer contains the core concepts required by each fact.
+#
+# Scores:
+#   0 = absent / incorrect
+#   1 = partial or incomplete support
+#   2 = clear support
+#
+# FactScore = sum(scores) / (2 * number of expected facts)
+#
+# This is intentionally transparent and reproducible. A small
+# human-checked subset can later be reported as a validation step.
+
+SYNONYMS: Dict[str, List[str]] = {
+    "whole life carbon": [
+        "whole life carbon",
+        "whole-life carbon",
+        "whole lifecycle carbon",
+        "whole life-cycle carbon",
+        "wlc",
+        "wlca",
+    ],
+    "operational carbon": [
+        "operational carbon",
+        "operational emissions",
+        "use stage carbon",
+        "carbon from operation",
+    ],
+    "embodied carbon": [
+        "embodied carbon",
+        "embodied emissions",
+        "carbon embodied in materials",
+        "material-related carbon",
+    ],
+    "life cycle": [
+        "life cycle",
+        "lifecycle",
+        "life-cycle",
+        "whole life",
+    ],
+    "like-for-like": [
+        "like for like",
+        "like-for-like",
+        "common basis",
+        "same basis",
+        "consistent basis",
+        "equivalent basis",
+    ],
+    "consistent assumptions": [
+        "consistent assumptions",
+        "same assumptions",
+        "equivalent assumptions",
+        "common assumptions",
+        "consistent methodology",
+    ],
+    "consistent data": [
+        "consistent data",
+        "same data basis",
+        "comparable data",
+        "common data",
+    ],
+    "equivalent scope": [
+        "equivalent scope",
+        "same scope",
+        "consistent scope",
+        "same boundary",
+        "consistent boundary",
+        "common boundary",
+    ],
+    "energy performance": [
+        "energy performance",
+        "energy efficiency",
+        "energy use",
+        "energy consumption",
+    ],
+    "operational costs": [
+        "operational costs",
+        "running costs",
+        "energy costs",
+        "operating costs",
+    ],
+    "carbon benefits": [
+        "carbon benefits",
+        "carbon reduction",
+        "lower carbon",
+        "emissions reduction",
+    ],
+    "breeam sustainability objectives": [
+        "breeam sustainability objectives",
+        "breeam objectives",
+        "breeam requirements",
+        "breeam credits",
+        "breeam performance",
+    ],
+    "evidence supports assessment": [
+        "evidence supports assessment",
+        "evidence supports the assessment",
+        "supports assessment",
+        "assessment evidence",
+    ],
+    "evidence supports verification": [
+        "evidence supports verification",
+        "supports verification",
+        "verification evidence",
+        "verification records",
+    ],
+    "evidence demonstrates compliance": [
+        "evidence demonstrates compliance",
+        "demonstrates compliance",
+        "compliance evidence",
+        "proof of compliance",
+    ],
+    "life cycle cost": [
+        "life cycle cost",
+        "life-cycle cost",
+        "lifecycle cost",
+        "life cycle costing",
+        "lcc",
+    ],
+    "capital cost": [
+        "capital cost",
+        "upfront cost",
+        "initial cost",
+        "initial capital",
+    ],
+    "professional involvement": [
+        "relevant professionals",
+        "professional involvement",
+        "specialists involved",
+        "multidisciplinary team",
+    ],
+    "design flexibility": [
+        "design flexibility",
+        "flexibility in design",
+        "design options",
+        "keep options open",
+    ],
+    "value engineering": [
+        "value engineering",
+        "value management",
+    ],
+    "project quantities": [
+        "project quantities",
+        "quantities",
+        "quantity information",
+        "quantity take-offs",
+        "quantity takeoffs",
+    ],
+    "quantity surveyor": [
+        "quantity surveyor",
+        "qs",
+    ],
+    "post-construction": [
+        "post-construction",
+        "post construction",
+        "as-built",
+        "after construction",
+    ],
+    "operational carbon reduction": [
+        "reduce operational carbon",
+        "operational carbon reduction",
+        "lower operational emissions",
+    ],
+    "additional materials": [
+        "additional materials",
+        "additional products",
+        "more material",
+        "material use",
+    ],
+    "long-term period": [
+        "long-term",
+        "long term",
+        "over 20 years",
+        "20 years",
+        "40 years",
+        "60 years",
+    ],
+}
+
+
+def normalise(text: str) -> str:
+    text = text.lower()
+    text = text.replace("&", " and ")
+    text = text.replace("–", "-").replace("—", "-")
+    text = re.sub(r"[^a-z0-9%\-\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def phrase_variants(fact: str) -> List[str]:
+    fact_norm = normalise(fact)
+    variants = [fact_norm]
+
+    for key, values in SYNONYMS.items():
+        if normalise(key) in fact_norm:
+            variants.extend(normalise(value) for value in values)
+
+    return list(dict.fromkeys(variants))
+
+
+def token_overlap(answer: str, fact: str) -> float:
+    answer_tokens = set(normalise(answer).split())
+    fact_tokens = set(normalise(fact).split())
+    if not fact_tokens:
+        return 0.0
+    return len(answer_tokens & fact_tokens) / len(fact_tokens)
+
+
+def score_fact(
     answer: str,
-) -> Dict[str, Any]:
-    """Score expected facts and forbidden claims."""
-    user_prompt = f"""
-QUESTION:
-{question}
+    fact: str,
+    scoring_note: str = "",
+) -> Tuple[int, str]:
+    answer_norm = normalise(answer)
+    variants = phrase_variants(fact)
 
-EXPECTED FACTS:
-{json.dumps(expected_facts, ensure_ascii=False, indent=2)}
+    if any(variant and variant in answer_norm for variant in variants):
+        return 2, "clear phrase or recognised equivalent"
 
-FORBIDDEN FACTS:
-{json.dumps(forbidden_facts, ensure_ascii=False, indent=2)}
+    overlap = token_overlap(answer, fact)
+    if overlap >= 0.60:
+        return 2, "strong concept overlap"
+    if overlap >= 0.30:
+        return 1, "partial concept overlap"
 
-CANDIDATE ANSWER:
-{answer}
+    # A scoring note often contains explicit semantic equivalents.
+    note_norm = normalise(scoring_note)
+    fact_terms = [
+        term for term in normalise(fact).split()
+        if len(term) > 3
+    ]
+    if fact_terms and sum(term in note_norm for term in fact_terms) >= max(1, len(fact_terms) // 2):
+        if any(term in answer_norm for term in fact_terms):
+            return 1, "partial support consistent with scoring note"
 
-Return exactly this JSON structure:
-{{
-  "fact_scores": [
-    {{
-      "fact": "exact expected fact string",
-      "score": 0,
-      "reason": "brief reason"
-    }}
-  ],
-  "forbidden_violations": [
-    {{
-      "fact": "exact forbidden fact string",
-      "violated": false,
-      "reason": "brief reason"
-    }}
-  ]
-}}
-
-Every expected fact must appear exactly once in fact_scores.
-Every forbidden fact must appear exactly once in
-forbidden_violations.
-"""
-
-    completion = client.chat.completions.create(
-        model=JUDGE_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": JUDGE_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-        temperature=JUDGE_TEMPERATURE,
-        response_format={"type": "json_object"},
-    )
-
-    return extract_json(
-        completion.choices[0].message.content or ""
-    )
+    return 0, "no sufficient support detected"
 
 
-# ============================================================
-# JUDGEMENT VALIDATION
-# ============================================================
-
-def validate_judgement(
-    judgement: Dict[str, Any],
+def semantic_fact_score(
+    answer: str,
     expected_facts: List[str],
-    forbidden_facts: List[str],
-) -> None:
-    """Check that the judge returned complete valid scoring."""
-    fact_scores = judgement.get("fact_scores")
-
-    if not isinstance(fact_scores, list):
-        raise ValueError(
-            "Judge output missing fact_scores list."
-        )
-
-    if len(fact_scores) != len(expected_facts):
-        raise ValueError(
-            "Judge returned the wrong number of fact scores: "
-            f"expected {len(expected_facts)}, "
-            f"got {len(fact_scores)}."
-        )
-
-    returned_facts = [
-        item.get("fact")
-        for item in fact_scores
-    ]
-
-    if returned_facts != expected_facts:
-        raise ValueError(
-            "Judge fact order/content does not exactly match "
-            "benchmark expected_facts."
-        )
-
-    for item in fact_scores:
-        if item.get("score") not in {0, 1, 2}:
-            raise ValueError(
-                f"Invalid semantic fact score: "
-                f"{item.get('score')}"
-            )
-
-    violations = judgement.get(
-        "forbidden_violations"
-    )
-
-    if not isinstance(violations, list):
-        raise ValueError(
-            "Judge output missing forbidden_violations list."
-        )
-
-    if len(violations) != len(forbidden_facts):
-        raise ValueError(
-            "Judge returned the wrong number of "
-            "forbidden-fact checks."
-        )
-
-    returned_forbidden = [
-        item.get("fact")
-        for item in violations
-    ]
-
-    if returned_forbidden != forbidden_facts:
-        raise ValueError(
-            "Judge forbidden-fact order/content does not exactly "
-            "match benchmark forbidden_facts."
-        )
-
-    for item in violations:
-        if not isinstance(
-            item.get("violated"),
-            bool,
-        ):
-            raise ValueError(
-                "Forbidden-fact 'violated' must be boolean."
-            )
-
-
-# ============================================================
-# SEMANTIC METRICS
-# ============================================================
-
-def calculate_semantic_metrics(
-    judgement: Dict[str, Any],
+    scoring_note: str = "",
 ) -> Dict[str, Any]:
-    """
-    Calculate transparent semantic expected-fact metrics.
+    fact_scores = []
+    total = 0
 
-    fact_score:
-        sum of 0/1/2 fact scores divided by 2N.
+    for fact in expected_facts:
+        score, reason = score_fact(answer, fact, scoring_note)
+        fact_scores.append({
+            "fact": fact,
+            "score": score,
+            "reason": reason,
+        })
+        total += score
 
-    complete_fact_rate:
-        proportion of expected facts scored 2.
+    denominator = 2 * len(expected_facts)
+    fact_score = total / denominator if denominator else 0.0
 
-    partial_fact_rate:
-        proportion scored 1.
-
-    zero_fact_rate:
-        proportion scored 0.
-
-    These metrics are NOT claim-level precision and do not
-    measure evidence groundedness.
-    """
-    scores = [
-        int(item["score"])
-        for item in judgement["fact_scores"]
-    ]
-
-    n = len(scores)
-
-    if n == 0:
-        fact_score = 0.0
-        complete_rate = 0.0
-        partial_rate = 0.0
-        zero_rate = 0.0
-    else:
-        fact_score = sum(scores) / (2.0 * n)
-        complete_rate = scores.count(2) / n
-        partial_rate = scores.count(1) / n
-        zero_rate = scores.count(0) / n
-
-    violations = [
-        item["fact"]
-        for item in judgement[
-            "forbidden_violations"
-        ]
-        if item["violated"]
-    ]
+    clear = sum(item["score"] == 2 for item in fact_scores)
+    partial = sum(item["score"] == 1 for item in fact_scores)
+    missing = sum(item["score"] == 0 for item in fact_scores)
 
     return {
         "fact_score": fact_score,
-        "complete_fact_rate": complete_rate,
-        "partial_fact_rate": partial_rate,
-        "zero_fact_rate": zero_rate,
-        "forbidden_violation_count": len(
-            violations
-        ),
+        "fact_scores": fact_scores,
+        "clear_facts": clear,
+        "partial_facts": partial,
+        "missing_fact_count": missing,
+    }
+
+
+def forbidden_fact_check(
+    answer: str,
+    forbidden_facts: List[str],
+) -> Dict[str, Any]:
+    answer_norm = normalise(answer)
+    violations = []
+
+    for fact in forbidden_facts:
+        variants = phrase_variants(fact)
+        violated = any(v and v in answer_norm for v in variants)
+        if violated:
+            violations.append({
+                "fact": fact,
+                "violated": True,
+                "reason": "forbidden phrase detected",
+            })
+
+    return {
+        "forbidden_violation_count": len(violations),
         "forbidden_violations": violations,
-        "fact_scores": scores,
     }
 
 
 # ============================================================
-# MAIN EVALUATION
+# SYSTEM EXECUTION
+# ============================================================
+
+def run_generic(
+    question: str,
+    profile: UserProfile,
+) -> Dict[str, Any]:
+    answer = generic_llm_no_rag(question, profile)
+    return {
+        "answer": answer,
+        "retrieved": [],
+        "collection": None,
+    }
+
+
+def run_single(
+    question: str,
+    profile: UserProfile,
+    store: RAGStore,
+) -> Dict[str, Any]:
+    try:
+        from .agents import single_agent_rag_with_trace
+
+        result = single_agent_rag_with_trace(
+            question,
+            profile,
+            store,
+        )
+        return result
+
+    except ImportError:
+        answer = single_agent_rag(
+            question,
+            profile,
+            store,
+        )
+        return {
+            "answer": answer,
+            "retrieved": [],
+            "collection": "ALL",
+        }
+
+
+def run_great(
+    question: str,
+    profile: UserProfile,
+    store: RAGStore,
+) -> Dict[str, Any]:
+    agents = build_agents(store)
+    specialist_answers: Dict[str, str] = {}
+    specialist_traces: Dict[str, Any] = {}
+
+    for name, agent in agents.items():
+        if hasattr(agent, "answer_with_trace"):
+            result = agent.answer_with_trace(
+                question,
+                profile,
+            )
+            specialist_answers[name] = result["answer"]
+            specialist_traces[name] = result
+        else:
+            specialist_answers[name] = agent.answer(
+                question,
+                profile,
+            )
+            specialist_traces[name] = {
+                "agent": name,
+                "answer": specialist_answers[name],
+                "retrieved": [],
+            }
+
+    planner = PlannerAgent()
+    final_answer = planner.consolidate(
+        question,
+        profile,
+        specialist_answers,
+    )
+
+    # Flatten specialist retrieval traces for evaluation.
+    # Each specialist contributes SPECIALIST_TOP_K retrieved chunks.
+    retrieved = []
+
+    for name, trace in specialist_traces.items():
+        for item in trace.get("retrieved", []):
+            item_with_agent = dict(item)
+            item_with_agent["agent"] = name
+            retrieved.append(item_with_agent)
+
+    return {
+        "answer": final_answer,
+        "specialist_answers": specialist_answers,
+        "specialist_traces": specialist_traces,
+        "retrieved": retrieved,
+        "collection": "SPECIALIST_AGENTS",
+    }
+
+
+# ============================================================
+# EVALUATION
 # ============================================================
 
 def evaluate() -> None:
-    """Semantically score the generated outputs from one run."""
+    print("=" * 72)
+    print("GREAT FINAL EVALUATION RUNNER")
+    print("=" * 72)
+    print(f"Benchmark : {QA_PATH}")
+    print(f"Run ID    : {RUN_ID}")
+    print(f"Mode      : {'PILOT' if PILOT_MODE else 'FULL'}")
     print()
-    print("=" * 70)
-    print("GREAT SEMANTIC FACT EVALUATION")
-    print("=" * 70)
-    print(f"Input       : {INPUT_PATH}")
-    print(f"Judge model : {JUDGE_MODEL}")
-    print(f"Temperature : {JUDGE_TEMPERATURE}")
-    print()
-
-    records = load_records(INPUT_PATH)
-    validate_records(records)
-
-    print("Input validation: PASS")
-    print(f"Questions: {len(records)}")
-    print("Systems per question: 3")
-    print("Answers to score: 144")
-    print()
-
-    output_records: List[Dict[str, Any]] = []
-    rows: List[Dict[str, Any]] = []
-
-    for question_index, record in enumerate(
-        records,
-        start=1,
-    ):
-        qid = record["id"]
-        question = record["question"]
-        expected_facts = record.get(
-            "expected_facts",
-            [],
-        )
-        forbidden_facts = record.get(
-            "forbidden_facts",
-            [],
-        )
-
-        print(
-            f"[{question_index:02d}/48] "
-            f"{qid}: scoring 3 systems..."
-        )
-
-        output_record = {
-            "run_id": record.get("run_id"),
-            "question_index": question_index,
-            "id": qid,
-            "domain": record.get("domain"),
-            "question_type": record.get(
-                "question_type"
-            ),
-            "difficulty": record.get(
-                "difficulty"
-            ),
-            "question": question,
-            "expected_facts": expected_facts,
-            "forbidden_facts": forbidden_facts,
-            "systems": {},
-        }
-
-        for system_name, system_data in (
-            record["systems"].items()
-        ):
-            answer = system_data.get(
-                "answer",
-                "",
-            )
-
-            judgement = judge_facts(
-                question=question,
-                expected_facts=expected_facts,
-                forbidden_facts=forbidden_facts,
-                answer=answer,
-            )
-
-            validate_judgement(
-                judgement,
-                expected_facts,
-                forbidden_facts,
-            )
-
-            metrics = calculate_semantic_metrics(
-                judgement
-            )
-
-            output_record[
-                "systems"
-            ][system_name] = {
-                "answer": answer,
-                "judgement": judgement,
-                "metrics": metrics,
-            }
-
-            rows.append(
-                {
-                    "run_id": record.get("run_id"),
-                    "question_index": question_index,
-                    "id": qid,
-                    "domain": record.get(
-                        "domain"
-                    ),
-                    "question_type": record.get(
-                        "question_type"
-                    ),
-                    "difficulty": record.get(
-                        "difficulty"
-                    ),
-                    "system": system_name,
-                    "fact_score": metrics[
-                        "fact_score"
-                    ],
-                    "complete_fact_rate": metrics[
-                        "complete_fact_rate"
-                    ],
-                    "partial_fact_rate": metrics[
-                        "partial_fact_rate"
-                    ],
-                    "zero_fact_rate": metrics[
-                        "zero_fact_rate"
-                    ],
-                    "forbidden_violation_count": metrics[
-                        "forbidden_violation_count"
-                    ],
-                    "forbidden_violations": "; ".join(
-                        metrics[
-                            "forbidden_violations"
-                        ]
-                    ),
-                    "fact_scores": ";".join(
-                        str(x)
-                        for x in metrics[
-                            "fact_scores"
-                        ]
-                    ),
-                }
-            )
-
-        output_records.append(
-            output_record
-        )
 
     OUT_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    run_id = records[0].get(
+    questions = load_questions()
+    validate_benchmark(questions)
+    selected = select_questions(questions)
+
+    print(
+        f"Benchmark validation: PASS ({len(questions)} questions)"
+    )
+    print(
+        f"Questions selected : {len(selected)}"
+    )
+    print(
+        f"Responses expected : {len(selected) * len(SYSTEMS)}"
+    )
+    print()
+
+    profile = make_default_profile()
+    store = RAGStore()
+
+    csv_rows: List[Dict[str, Any]] = []
+    full_records: List[Dict[str, Any]] = []
+
+    for question_index, q in enumerate(
+        selected,
+        start=1,
+    ):
+        qid = q["id"]
+        question = q["question"]
+        expected_facts = q["expected_facts"]
+        forbidden_facts = q["forbidden_facts"]
+        scoring_note = q.get("scoring_note", "")
+
+        print("-" * 72)
+        print(
+            f"[{question_index}/{len(selected)}] {qid}"
+        )
+        print(question)
+
+        system_results: Dict[str, Any] = {}
+
+        print("  1/3 Generic LLM")
+        system_results["generic_llm_no_rag"] = run_generic(
+            question,
+            profile,
+        )
+
+        print("  2/3 Single-agent RAG")
+        system_results["single_agent_rag"] = run_single(
+            question,
+            profile,
+            store,
+        )
+
+        print("  3/3 GREAT multi-agent RAG")
+        system_results["great_multi_agent_rag"] = run_great(
+            question,
+            profile,
+            store,
+        )
+
+        record = {
+            "run_id": RUN_ID,
+            "question_index": question_index,
+            "id": qid,
+            "domain": q["domain"],
+            "question_type": q["question_type"],
+            "difficulty": q["difficulty"],
+            "question": question,
+            "expected_facts": expected_facts,
+            "forbidden_facts": forbidden_facts,
+            "source_doc_id": q["source_doc_id"],
+            "source_pages": q["source_pages"],
+            "scoring_note": scoring_note,
+            "systems": {},
+        }
+
+        for system_name, result in system_results.items():
+            answer = result.get(
+                "answer",
+                "",
+            )
+
+            semantic = semantic_fact_score(
+                answer,
+                expected_facts,
+                scoring_note,
+            )
+
+            forbidden = forbidden_fact_check(
+                answer,
+                forbidden_facts,
+            )
+
+            retrieval = result.get(
+                "retrieved",
+                [],
+            ) or []
+
+            unique_sources = set()
+
+            for item in retrieval:
+                source = (
+                    item.get("source")
+                    or item.get("source_doc_id")
+                )
+
+                if source:
+                    unique_sources.add(
+                        str(source)
+                    )
+
+            row = {
+                "run_id": RUN_ID,
+                "question_index": question_index,
+                "id": qid,
+                "domain": q["domain"],
+                "question_type": q["question_type"],
+                "difficulty": q["difficulty"],
+                "system": system_name,
+                "fact_score": semantic["fact_score"],
+                "clear_facts": semantic["clear_facts"],
+                "partial_facts": semantic["partial_facts"],
+                "missing_fact_count": semantic["missing_fact_count"],
+                "forbidden_violation_count": (
+                    forbidden[
+                        "forbidden_violation_count"
+                    ]
+                ),
+                "retrieved_count": len(retrieval),
+                "unique_source_count": len(
+                    unique_sources
+                ),
+            }
+
+            csv_rows.append(row)
+
+            record["systems"][system_name] = {
+                "answer": answer,
+                "semantic_score": semantic,
+                "forbidden_check": forbidden,
+                "retrieved": retrieval,
+                "collection": result.get(
+                    "collection"
+                ),
+                "specialist_answers": result.get(
+                    "specialist_answers"
+                ),
+                "specialist_traces": result.get(
+                    "specialist_traces"
+                ),
+            }
+
+            print(
+                f"      {system_name}: "
+                f"FactScore="
+                f"{semantic['fact_score']:.3f}, "
+                f"forbidden="
+                f"{forbidden['forbidden_violation_count']}"
+            )
+
+        full_records.append(record)
+
+    metrics_path = (
+        OUT_DIR
+        / f"qa_semantic_metrics_{RUN_ID}.csv"
+    )
+
+    outputs_path = (
+        OUT_DIR
+        / f"qa_semantic_outputs_{RUN_ID}.jsonl"
+    )
+
+    fieldnames = [
         "run_id",
-        "unknown",
-    )
+        "question_index",
+        "id",
+        "domain",
+        "question_type",
+        "difficulty",
+        "system",
+        "fact_score",
+        "clear_facts",
+        "partial_facts",
+        "missing_fact_count",
+        "forbidden_violation_count",
+        "retrieved_count",
+        "unique_source_count",
+    ]
 
-    csv_path = (
-        OUT_DIR
-        / f"qa_semantic_metrics_{run_id}.csv"
-    )
-
-    jsonl_path = (
-        OUT_DIR
-        / f"qa_semantic_outputs_{run_id}.jsonl"
-    )
-
-    with csv_path.open(
+    with metrics_path.open(
         "w",
         newline="",
         encoding="utf-8",
     ) as f:
-        fieldnames = [
-            "run_id",
-            "question_index",
-            "id",
-            "domain",
-            "question_type",
-            "difficulty",
-            "system",
-            "fact_score",
-            "complete_fact_rate",
-            "partial_fact_rate",
-            "zero_fact_rate",
-            "forbidden_violation_count",
-            "forbidden_violations",
-            "fact_scores",
-        ]
-
         writer = csv.DictWriter(
             f,
             fieldnames=fieldnames,
         )
-
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(csv_rows)
 
-    with jsonl_path.open(
+    with outputs_path.open(
         "w",
         encoding="utf-8",
     ) as f:
-        for record in output_records:
+        for record in full_records:
             f.write(
                 json.dumps(
                     record,
@@ -561,20 +772,19 @@ def evaluate() -> None:
             )
 
     print()
-    print("=" * 70)
-    print("SEMANTIC EVALUATION COMPLETE")
-    print("=" * 70)
-    print(f"Saved CSV   : {csv_path}")
-    print(f"Saved JSONL : {jsonl_path}")
-    print(f"Rows        : {len(rows)}")
+    print("=" * 72)
+    print("RUN COMPLETE")
+    print("=" * 72)
+    print(
+        f"Responses generated : {len(csv_rows)}"
+    )
+    print(
+        f"Metrics             : {metrics_path}"
+    )
+    print(
+        f"Full outputs        : {outputs_path}"
+    )
     print()
-    print(
-        "fact_score = semantic expected-fact coverage."
-    )
-    print(
-        "It is NOT claim-level precision or evidence "
-        "groundedness."
-    )
 
 
 if __name__ == "__main__":
