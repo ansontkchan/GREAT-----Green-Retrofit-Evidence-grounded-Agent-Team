@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -25,7 +26,7 @@ OUT_DIR = Path("logs")
 
 # One execution = one experimental run.
 # Use run_01 ... run_05 for the five repeated runs.
-RUN_ID = "run_01"
+RUN_ID = os.getenv("GREAT_RUN_ID", "rep_01")
 
 # Smoke test first. Set to False only after the 9-response test passes.
 PILOT_MODE = False
@@ -553,24 +554,15 @@ def evaluate() -> None:
     print(f"Mode      : {'PILOT' if PILOT_MODE else 'FULL'}")
     print()
 
-    OUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     questions = load_questions()
     validate_benchmark(questions)
     selected = select_questions(questions)
 
-    print(
-        f"Benchmark validation: PASS ({len(questions)} questions)"
-    )
-    print(
-        f"Questions selected : {len(selected)}"
-    )
-    print(
-        f"Responses expected : {len(selected) * len(SYSTEMS)}"
-    )
+    print(f"Benchmark validation: PASS ({len(questions)} questions)")
+    print(f"Questions selected : {len(selected)}")
+    print(f"Responses expected : {len(selected) * len(SYSTEMS)}")
     print()
 
     profile = make_default_profile()
@@ -579,211 +571,151 @@ def evaluate() -> None:
     csv_rows: List[Dict[str, Any]] = []
     full_records: List[Dict[str, Any]] = []
 
-    for question_index, q in enumerate(
-        selected,
-        start=1,
-    ):
-        qid = q["id"]
-        question = q["question"]
-        expected_facts = q["expected_facts"]
-        forbidden_facts = q["forbidden_facts"]
-        scoring_note = q.get("scoring_note", "")
+    fieldnames = [
+        "run_id", "question_index", "id", "domain", "question_type",
+        "difficulty", "system", "fact_score", "clear_facts",
+        "partial_facts", "missing_fact_count", "forbidden_violation_count",
+        "retrieved_count", "unique_source_count",
+    ]
 
-        print("-" * 72)
-        print(
-            f"[{question_index}/{len(selected)}] {qid}"
-        )
-        print(question)
+    # Write incrementally to partial files. Promote to final filenames only
+    # after all questions complete successfully.
+    partial_metrics_path = OUT_DIR / f"qa_semantic_metrics_{RUN_ID}.partial.csv"
+    partial_outputs_path = OUT_DIR / f"qa_semantic_outputs_{RUN_ID}.partial.jsonl"
+    metrics_path = OUT_DIR / f"qa_semantic_metrics_{RUN_ID}.csv"
+    outputs_path = OUT_DIR / f"qa_semantic_outputs_{RUN_ID}.jsonl"
 
-        system_results: Dict[str, Any] = {}
-
-        print("  1/3 Generic LLM")
-        system_results["generic_llm_no_rag"] = run_generic(
-            question,
-            profile,
+    if metrics_path.exists() or outputs_path.exists():
+        raise FileExistsError(
+            f"Completed output already exists for RUN_ID={RUN_ID}. "
+            "Use a new GREAT_RUN_ID instead of overwriting an existing run."
         )
 
-        print("  2/3 Single-agent RAG")
-        system_results["single_agent_rag"] = run_single(
-            question,
-            profile,
-            store,
+    if partial_metrics_path.exists() or partial_outputs_path.exists():
+        raise FileExistsError(
+            f"Partial output already exists for RUN_ID={RUN_ID}. "
+            "Inspect or remove the partial files before rerunning."
         )
 
-        print("  3/3 GREAT multi-agent RAG")
-        system_results["great_multi_agent_rag"] = run_great(
-            question,
-            profile,
-            store,
-        )
+    with partial_metrics_path.open("w", newline="", encoding="utf-8") as metrics_file, \
+         partial_outputs_path.open("w", encoding="utf-8") as outputs_file:
 
-        record = {
-            "run_id": RUN_ID,
-            "question_index": question_index,
-            "id": qid,
-            "domain": q["domain"],
-            "question_type": q["question_type"],
-            "difficulty": q["difficulty"],
-            "question": question,
-            "expected_facts": expected_facts,
-            "forbidden_facts": forbidden_facts,
-            "source_doc_id": q["source_doc_id"],
-            "source_pages": q["source_pages"],
-            "scoring_note": scoring_note,
-            "systems": {},
-        }
+        metrics_writer = csv.DictWriter(metrics_file, fieldnames=fieldnames)
+        metrics_writer.writeheader()
+        metrics_file.flush()
 
-        for system_name, result in system_results.items():
-            answer = result.get(
-                "answer",
-                "",
-            )
+        for question_index, q in enumerate(selected, start=1):
+            qid = q["id"]
+            question = q["question"]
+            expected_facts = q["expected_facts"]
+            forbidden_facts = q["forbidden_facts"]
+            scoring_note = q.get("scoring_note", "")
 
-            semantic = semantic_fact_score(
-                answer,
-                expected_facts,
-                scoring_note,
-            )
+            print("-" * 72)
+            print(f"[{question_index}/{len(selected)}] {qid}")
+            print(question)
 
-            forbidden = forbidden_fact_check(
-                answer,
-                forbidden_facts,
-            )
+            system_results: Dict[str, Any] = {}
 
-            retrieval = result.get(
-                "retrieved",
-                [],
-            ) or []
+            print("  1/3 Generic LLM")
+            system_results["generic_llm_no_rag"] = run_generic(question, profile)
 
-            unique_sources = set()
+            print("  2/3 Single-agent RAG")
+            system_results["single_agent_rag"] = run_single(question, profile, store)
 
-            for item in retrieval:
-                source = (
-                    item.get("source")
-                    or item.get("source_doc_id")
-                )
+            print("  3/3 GREAT multi-agent RAG")
+            system_results["great_multi_agent_rag"] = run_great(question, profile, store)
 
-                if source:
-                    unique_sources.add(
-                        str(source)
-                    )
+            question_rows: List[Dict[str, Any]] = []
 
-            row = {
+            record = {
                 "run_id": RUN_ID,
                 "question_index": question_index,
                 "id": qid,
                 "domain": q["domain"],
                 "question_type": q["question_type"],
                 "difficulty": q["difficulty"],
-                "system": system_name,
-                "fact_score": semantic["fact_score"],
-                "clear_facts": semantic["clear_facts"],
-                "partial_facts": semantic["partial_facts"],
-                "missing_fact_count": semantic["missing_fact_count"],
-                "forbidden_violation_count": (
-                    forbidden[
-                        "forbidden_violation_count"
-                    ]
-                ),
-                "retrieved_count": len(retrieval),
-                "unique_source_count": len(
-                    unique_sources
-                ),
+                "question": question,
+                "expected_facts": expected_facts,
+                "forbidden_facts": forbidden_facts,
+                "source_doc_id": q["source_doc_id"],
+                "source_pages": q["source_pages"],
+                "scoring_note": scoring_note,
+                "systems": {},
             }
 
-            csv_rows.append(row)
+            for system_name, result in system_results.items():
+                answer = result.get("answer", "")
 
-            record["systems"][system_name] = {
-                "answer": answer,
-                "semantic_score": semantic,
-                "forbidden_check": forbidden,
-                "retrieved": retrieval,
-                "collection": result.get(
-                    "collection"
-                ),
-                "specialist_answers": result.get(
-                    "specialist_answers"
-                ),
-                "specialist_traces": result.get(
-                    "specialist_traces"
-                ),
-            }
+                semantic = semantic_fact_score(answer, expected_facts, scoring_note)
+                forbidden = forbidden_fact_check(answer, forbidden_facts)
+                retrieval = result.get("retrieved", []) or []
+
+                unique_sources = set()
+                for item in retrieval:
+                    source = item.get("source") or item.get("source_doc_id")
+                    if source:
+                        unique_sources.add(str(source))
+
+                row = {
+                    "run_id": RUN_ID,
+                    "question_index": question_index,
+                    "id": qid,
+                    "domain": q["domain"],
+                    "question_type": q["question_type"],
+                    "difficulty": q["difficulty"],
+                    "system": system_name,
+                    "fact_score": semantic["fact_score"],
+                    "clear_facts": semantic["clear_facts"],
+                    "partial_facts": semantic["partial_facts"],
+                    "missing_fact_count": semantic["missing_fact_count"],
+                    "forbidden_violation_count": forbidden["forbidden_violation_count"],
+                    "retrieved_count": len(retrieval),
+                    "unique_source_count": len(unique_sources),
+                }
+
+                csv_rows.append(row)
+                question_rows.append(row)
+
+                record["systems"][system_name] = {
+                    "answer": answer,
+                    "semantic_score": semantic,
+                    "forbidden_check": forbidden,
+                    "retrieved": retrieval,
+                    "collection": result.get("collection"),
+                    "specialist_answers": result.get("specialist_answers"),
+                    "specialist_traces": result.get("specialist_traces"),
+                }
+
+                print(
+                    f"      {system_name}: FactScore={semantic['fact_score']:.3f}, "
+                    f"forbidden={forbidden['forbidden_violation_count']}"
+                )
+
+            full_records.append(record)
+
+            # Checkpoint immediately after the complete question is scored.
+            metrics_writer.writerows(question_rows)
+            metrics_file.flush()
+
+            outputs_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            outputs_file.flush()
 
             print(
-                f"      {system_name}: "
-                f"FactScore="
-                f"{semantic['fact_score']:.3f}, "
-                f"forbidden="
-                f"{forbidden['forbidden_violation_count']}"
+                f"      CHECKPOINT SAVED: {question_index}/{len(selected)} questions"
             )
 
-        full_records.append(record)
-
-    metrics_path = (
-        OUT_DIR
-        / f"qa_semantic_metrics_{RUN_ID}.csv"
-    )
-
-    outputs_path = (
-        OUT_DIR
-        / f"qa_semantic_outputs_{RUN_ID}.jsonl"
-    )
-
-    fieldnames = [
-        "run_id",
-        "question_index",
-        "id",
-        "domain",
-        "question_type",
-        "difficulty",
-        "system",
-        "fact_score",
-        "clear_facts",
-        "partial_facts",
-        "missing_fact_count",
-        "forbidden_violation_count",
-        "retrieved_count",
-        "unique_source_count",
-    ]
-
-    with metrics_path.open(
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=fieldnames,
-        )
-        writer.writeheader()
-        writer.writerows(csv_rows)
-
-    with outputs_path.open(
-        "w",
-        encoding="utf-8",
-    ) as f:
-        for record in full_records:
-            f.write(
-                json.dumps(
-                    record,
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+    # A final filename means the entire run completed successfully.
+    partial_metrics_path.replace(metrics_path)
+    partial_outputs_path.replace(outputs_path)
 
     print()
     print("=" * 72)
     print("RUN COMPLETE")
     print("=" * 72)
-    print(
-        f"Responses generated : {len(csv_rows)}"
-    )
-    print(
-        f"Metrics             : {metrics_path}"
-    )
-    print(
-        f"Full outputs        : {outputs_path}"
-    )
+    print(f"Responses generated : {len(csv_rows)}")
+    print(f"Metrics             : {metrics_path}")
+    print(f"Full outputs        : {outputs_path}")
     print()
 
 
